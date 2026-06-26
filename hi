@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Particle Sphere</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0f; overflow: hidden; font-family: 'Georgia', serif; color: #fff; }
+
+  #webcam-bg {
+    position: fixed; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    opacity: 0;
+    transform: scaleX(-1);
+    transition: opacity 0.6s;
+    z-index: 0;
+  }
+  #webcam-bg.active { opacity: 0.22; }
+
+  canvas {
+    position: fixed; inset: 0;
+    z-index: 1;
+  }
+
+  #ui {
+    position: fixed; top: 0; left: 0; right: 0;
+    padding: 28px 32px;
+    z-index: 10;
+    pointer-events: none;
+    display: flex; justify-content: space-between; align-items: flex-start;
+  }
+
+  #title {
+    font-size: 18px;
+    font-weight: 400;
+    letter-spacing: 0.04em;
+    color: rgba(255,255,255,0.85);
+    line-height: 1.4;
+  }
+  #title span {
+    display: block;
+    font-size: 11px;
+    color: rgba(255,255,255,0.35);
+    font-family: 'Courier New', monospace;
+    letter-spacing: 0.12em;
+    margin-top: 4px;
+  }
+
+  #controls {
+    display: flex; gap: 10px; align-items: center;
+    pointer-events: all;
+  }
+
+  #cam-btn {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.14);
+    color: rgba(255,255,255,0.7);
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    padding: 8px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  #cam-btn:hover {
+    background: rgba(255,255,255,0.11);
+    color: rgba(255,255,255,0.95);
+    border-color: rgba(255,255,255,0.28);
+  }
+
+  #status {
+    position: fixed; bottom: 28px; left: 32px;
+    z-index: 10;
+    font-family: 'Courier New', monospace;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: rgba(255,255,255,0.25);
+    line-height: 1.9;
+    pointer-events: none;
+  }
+
+  #charge-ring-wrap {
+    position: fixed;
+    z-index: 9;
+    pointer-events: none;
+    transform: translate(-50%, -50%);
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+  #charge-ring-wrap.visible { opacity: 1; }
+  #charge-svg { transform: rotate(-90deg); }
+  #charge-track { fill: none; stroke: rgba(255,255,255,0.1); stroke-width: 3; }
+  #charge-fill  { fill: none; stroke-width: 3; stroke-linecap: round;
+                  stroke-dasharray: 188.5; stroke-dashoffset: 188.5;
+                  transition: stroke 0.15s; }
+</style>
+</head>
+<body>
+
+<video id="webcam-bg" autoplay playsinline muted></video>
+<canvas id="c"></canvas>
+
+<div id="ui">
+  <div id="title">
+    Particle Sphere
+    <span>mediapipe · webgl</span>
+  </div>
+  <div id="controls">
+    <button id="cam-btn">WEBCAM BG OFF</button>
+  </div>
+</div>
+
+<div id="status">
+  <div id="s-hand">hand — —</div>
+  <div id="s-fingers">fingers — —</div>
+  <div id="s-pinch">pinch — —</div>
+  <div id="s-two">two hands — —</div>
+</div>
+
+<div id="charge-ring-wrap">
+  <svg id="charge-svg" width="70" height="70" viewBox="0 0 70 70">
+    <circle id="charge-track" cx="35" cy="35" r="30"/>
+    <circle id="charge-fill"  cx="35" cy="35" r="30"/>
+  </svg>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script>
+(function(){
+
+/* ── canvas setup ── */
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl', { antialias: true, alpha: true });
+if (!gl) { alert('WebGL not supported'); return; }
+
+function resize() {
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+resize();
+window.addEventListener('resize', resize);
+
+/* ── shaders ── */
+const vsSource = `
+attribute vec3 aPos;
+attribute float aPhase;
+uniform mat4 uMVP;
+uniform float uExplode;
+uniform float uTime;
+varying float vBright;
+varying float vPhase;
+void main(){
+  vec3 p = aPos;
+  float ex = uExplode;
+  if(ex > 0.0){
+    vec3 dir = normalize(aPos);
+    float t = ex * (1.0 + 0.6 * sin(aPhase * 17.3));
+    p = aPos + dir * t * 3.8;
+    p += vec3(sin(aPhase*5.1+uTime)*0.3, cos(aPhase*7.3+uTime)*0.3, sin(aPhase*3.7+uTime)*0.3) * ex;
+  }
+  gl_Position = uMVP * vec4(p, 1.0);
+  float dist = length(p);
+  vBright = 1.0 - clamp(dist / 4.0, 0.0, 0.7);
+  vPhase = aPhase;
+  gl_PointSize = mix(2.5, 1.2, clamp(gl_Position.z * 0.3 + 0.5, 0.0, 1.0));
+}`;
+
+const fsSource = `
+precision mediump float;
+uniform vec3 uColor;
+uniform float uExplode;
+varying float vBright;
+varying float vPhase;
+void main(){
+  vec2 cxy = 2.0 * gl_PointCoord - 1.0;
+  float r = dot(cxy, cxy);
+  if(r > 1.0) discard;
+  float alpha = (1.0 - r) * (0.7 + 0.3 * vBright);
+  vec3 col = uColor;
+  if(uExplode > 0.0){
+    float h = vPhase * 6.28318;
+    vec3 ex_col = vec3(0.5 + 0.5*sin(h), 0.5 + 0.5*sin(h+2.09), 0.5 + 0.5*sin(h+4.19));
+    col = mix(col, ex_col, uExplode * 0.85);
+    alpha *= (1.0 - uExplode * 0.4);
+  }
+  gl_FragColor = vec4(col * (0.6 + 0.4 * vBright), alpha);
+}`;
+
+function compileShader(src, type) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compileShader(vsSource, gl.VERTEX_SHADER));
+gl.attachShader(prog, compileShader(fsSource, gl.FRAGMENT_SHADER));
+gl.linkProgram(prog);
+gl.useProgram(prog);
+
+const aPos   = gl.getAttribLocation(prog, 'aPos');
+const aPhase = gl.getAttribLocation(prog, 'aPhase');
+const uMVP     = gl.getUniformLocation(prog, 'uMVP');
+const uColor   = gl.getUniformLocation(prog, 'uColor');
+const uExplode = gl.getUniformLocation(prog, 'uExplode');
+const uTime    = gl.getUniformLocation(prog, 'uTime');
+
+/* ── particles ── */
+const N = 3000;
+const basePositions = new Float32Array(N * 3);
+const phases        = new Float32Array(N);
+
+function buildSphere(radius) {
+  for (let i = 0; i < N; i++) {
+    const phi   = Math.acos(1 - 2 * (i + 0.5) / N);
+    const theta = Math.PI * (1 + Math.sqrt(5)) * i;
+    basePositions[i*3]   = radius * Math.sin(phi) * Math.cos(theta);
+    basePositions[i*3+1] = radius * Math.sin(phi) * Math.sin(theta);
+    basePositions[i*3+2] = radius * Math.cos(phi);
+    phases[i] = i / N;
+  }
+}
+buildSphere(1.0);
+
+const posBuf   = gl.createBuffer();
+const phaseBuf = gl.createBuffer();
+
+function uploadPositions(pos) {
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, pos, gl.DYNAMIC_DRAW);
+}
+function uploadPhases() {
+  gl.bindBuffer(gl.ARRAY_BUFFER, phaseBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, phases, gl.STATIC_DRAW);
+}
+uploadPositions(basePositions);
+uploadPhases();
+
+/* ── math helpers ── */
+function mat4Multiply(a, b) {
+  const out = new Float32Array(16);
+  for (let i=0;i<4;i++) for(let j=0;j<4;j++) {
+    let s=0; for(let k=0;k<4;k++) s+=a[i*4+k]*b[k*4+j];
+    out[i*4+j]=s;
+  }
+  return out;
+}
+function mat4Perspective(fov, aspect, near, far) {
+  const f = 1/Math.tan(fov/2);
+  const m = new Float32Array(16);
+  m[0]=f/aspect; m[5]=f;
+  m[10]=(far+near)/(near-far); m[11]=-1;
+  m[14]=2*far*near/(near-far);
+  return m;
+}
+function mat4RotX(a) {
+  const m = new Float32Array(16);
+  m[0]=1; m[5]=Math.cos(a); m[6]=-Math.sin(a);
+  m[9]=Math.sin(a); m[10]=Math.cos(a); m[15]=1;
+  return m;
+}
+function mat4RotY(a) {
+  const m = new Float32Array(16);
+  m[0]=Math.cos(a); m[2]=Math.sin(a); m[5]=1;
+  m[8]=-Math.sin(a); m[10]=Math.cos(a); m[15]=1;
+  return m;
+}
+function mat4Trans(x, y, z) {
+  const m = new Float32Array(16); m[0]=m[5]=m[10]=m[15]=1;
+  m[12]=x; m[13]=y; m[14]=z;
+  return m;
+}
+function mat4Scale(s) {
+  const m = new Float32Array(16);
+  m[0]=m[5]=m[10]=s; m[15]=1;
+  return m;
+}
+
+/* ── state ── */
+let sphereX = 0, sphereY = 0;           // world offset
+let targetX = 0, targetY = 0;
+let rotX = 0, rotY = 0;
+let targetRotX = 0, targetRotY = 0;
+let sphereRadius = 1.0, targetRadius = 1.0;
+let fingerCount = 0;
+let explodeT = 0;           // 0 = formed, 1 = fully exploded
+let explodePhase = 'none';  // none | charging | exploding | reforming
+let chargeAmount = 0;       // 0–1
+let pinchActive = false;
+let pinchStartTime = 0;
+let pinchX = 0, pinchY = 0;
+let twoHandDist = null;
+let twoHandBaseDist = null;
+let twoHandBaseRadius = 1.0;
+
+/* ── color by finger count ── */
+const COLORS = [
+  [0.55, 0.45, 1.0],   // 0 – purple
+  [0.3,  0.85, 0.75],  // 1 – teal
+  [1.0,  0.45, 0.35],  // 2 – coral
+  [0.4,  0.75, 1.0],   // 3 – sky
+  [1.0,  0.8,  0.3],   // 4 – amber
+  [0.65, 1.0,  0.45],  // 5 – green
+  [1.0,  0.45, 0.75],  // 6 – pink
+  [0.5,  0.9,  1.0],   // 7 – cyan
+  [1.0,  0.65, 0.25],  // 8 – orange
+  [0.85, 0.4,  1.0],   // 9 – violet
+  [1.0,  0.35, 0.35],  // 10 – red
+];
+let currentColor = [0.55, 0.45, 1.0];
+let targetColor  = [0.55, 0.45, 1.0];
+
+/* ── charge ring UI ── */
+const ringWrap  = document.getElementById('charge-ring-wrap');
+const ringFill  = document.getElementById('charge-fill');
+const RING_CIRC = 188.5;
+
+function updateRing(charge, px, py) {
+  if (charge <= 0) { ringWrap.classList.remove('visible'); return; }
+  ringWrap.classList.add('visible');
+  ringWrap.style.left = px + 'px';
+  ringWrap.style.top  = py + 'px';
+  const offset = RING_CIRC * (1 - charge);
+  ringFill.style.strokeDashoffset = offset;
+  const hue = charge * 60;
+  ringFill.style.stroke = `hsl(${hue + 260},90%,70%)`;
+}
+
+/* ── status DOM ── */
+const sHand    = document.getElementById('s-hand');
+const sFingers = document.getElementById('s-fingers');
+const sPinch   = document.getElementById('s-pinch');
+const sTwo     = document.getElementById('s-two');
+
+/* ── webcam background toggle ── */
+const camBtn  = document.getElementById('cam-btn');
+const webcamBg = document.getElementById('webcam-bg');
+let bgActive = false;
+camBtn.addEventListener('click', () => {
+  bgActive = !bgActive;
+  webcamBg.classList.toggle('active', bgActive);
+  camBtn.textContent = bgActive ? 'WEBCAM BG ON' : 'WEBCAM BG OFF';
+});
+
+/* ── MediaPipe Hands ── */
+const videoEl = document.createElement('video');
+videoEl.autoplay = true;
+videoEl.playsInline = true;
+videoEl.muted = true;
+videoEl.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;';
+document.body.appendChild(videoEl);
+
+// Also pipe to bg video
+const bgVid = document.getElementById('webcam-bg');
+
+let handsReady = false;
+let lastResults = null;
+
+function initMediaPipe() {
+  const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+  hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.6 });
+  hands.onResults(onResults);
+
+  navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: 'user' } })
+    .then(stream => {
+      videoEl.srcObject = stream;
+      bgVid.srcObject = stream;
+      const camera = new Camera(videoEl, {
+        onFrame: async () => { await hands.send({ image: videoEl }); },
+        width: 640, height: 480
+      });
+      camera.start();
+      handsReady = true;
+    })
+    .catch(() => {
+      sHand.textContent = 'hand — no camera access';
+    });
+}
+
+/* ── landmark helpers ── */
+function landmark(lms, i) { return { x: lms[i].x, y: lms[i].y, z: lms[i].z }; }
+
+function pinchDist(lms) {
+  const t = landmark(lms, 4);
+  const i = landmark(lms, 8);
+  return Math.hypot(t.x - i.x, t.y - i.y);
+}
+
+function handCenter(lms) {
+  return {
+    x: (lms[0].x + lms[9].x) * 0.5,
+    y: (lms[0].y + lms[9].y) * 0.5,
+  };
+}
+
+function countFingers(lms) {
+  const tips   = [8, 12, 16, 20];
+  const mids   = [6, 10, 14, 18];
+  let count = 0;
+  for (let i = 0; i < 4; i++) {
+    if (lms[tips[i]].y < lms[mids[i]].y) count++;
+  }
+  // thumb
+  if (lms[4].x < lms[3].x) count++; // mirrored
+  return count;
+}
+
+function twoHandDistance(lms0, lms1) {
+  const c0 = handCenter(lms0);
+  const c1 = handCenter(lms1);
+  return Math.hypot(c0.x - c1.x, c0.y - c1.y);
+}
+
+/* ── result handler ── */
+function onResults(results) {
+  lastResults = results;
+  const multi = results.multiHandLandmarks;
+  if (!multi || multi.length === 0) {
+    pinchActive = false;
+    twoHandDist = null;
+    twoHandBaseDist = null;
+    sHand.textContent    = 'hand — none';
+    sFingers.textContent = 'fingers — —';
+    sPinch.textContent   = 'pinch — —';
+    sTwo.textContent     = 'two hands — none';
+    return;
+  }
+
+  const W = window.innerWidth, H = window.innerHeight;
+  const lms0 = multi[0];
+  const c0 = handCenter(lms0);
+
+  // world coords: mirror x, center around 0
+  const wx = (0.5 - c0.x) * 4.2;
+  const wy = (0.5 - c0.y) * 3.0;
+  targetX = wx; targetY = wy;
+
+  // rotation from hand position
+  targetRotY = (c0.x - 0.5) * Math.PI * 1.2;
+  targetRotX = (c0.y - 0.5) * Math.PI * 0.8;
+
+  // finger count → color
+  const fc = countFingers(lms0);
+  fingerCount = fc;
+  const col = COLORS[Math.min(fc, COLORS.length - 1)];
+  targetColor = col;
+  sFingers.textContent = `fingers — ${fc}`;
+  sHand.textContent    = `hand — detected`;
+
+  // pinch detection
+  const pd = pinchDist(lms0);
+  const PINCH_THRESH = 0.055;
+  const isPinch = pd < PINCH_THRESH;
+  sPinch.textContent = `pinch — ${isPinch ? 'yes (' + pd.toFixed(3) + ')' : 'no'}`;
+
+  // pinch screen position for ring
+  const tip4 = lms0[4], tip8 = lms0[8];
+  pinchX = ((1 - (tip4.x + tip8.x) * 0.5)) * W;
+  pinchY = ((tip4.y + tip8.y) * 0.5) * H;
+
+  if (isPinch) {
+    if (!pinchActive) {
+      pinchActive = true;
+      pinchStartTime = performance.now();
+    }
+    const held = (performance.now() - pinchStartTime) / 1000;
+    chargeAmount = Math.min(held / 1.4, 1.0);
+    if (explodePhase === 'none') explodePhase = 'charging';
+  } else {
+    if (pinchActive && chargeAmount > 0.05 && explodePhase === 'charging') {
+      explodePhase = 'exploding';
+    }
+    pinchActive = false;
+    chargeAmount = 0;
+  }
+
+  // two hands
+  if (multi.length >= 2) {
+    const lms1 = multi[1];
+    const d = twoHandDistance(lms0, lms1);
+    if (twoHandBaseDist === null) {
+      twoHandBaseDist = d;
+      twoHandBaseRadius = sphereRadius;
+    }
+    const ratio = d / twoHandBaseDist;
+    targetRadius = Math.max(0.4, Math.min(2.4, twoHandBaseRadius * ratio));
+    sTwo.textContent = `two hands — spread ${d.toFixed(3)}`;
+  } else {
+    twoHandBaseDist = null;
+    sTwo.textContent = 'two hands — none';
+  }
+}
+
+/* ── animation loop ── */
+let t = 0;
+let autoRotY = 0;
+
+// Working particle positions (for reform lerp)
+const workPos = new Float32Array(basePositions);
+const explodedPos = new Float32Array(N * 3);
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function frame(ts) {
+  requestAnimationFrame(frame);
+  t = ts * 0.001;
+
+  /* ── rebuild base sphere if radius changed ── */
+  const prevRadius = sphereRadius;
+  sphereRadius = lerp(sphereRadius, targetRadius, 0.06);
+  if (Math.abs(sphereRadius - prevRadius) > 0.0005) {
+    buildSphere(sphereRadius);
+  }
+
+  /* ── smooth color ── */
+  for (let i=0;i<3;i++) currentColor[i] = lerp(currentColor[i], targetColor[i], 0.07);
+
+  /* ── smooth sphere position & rotation ── */
+  sphereX = lerp(sphereX, targetX, 0.08);
+  sphereY = lerp(sphereY, targetY, 0.08);
+  rotX = lerp(rotX, targetRotX, 0.06);
+  rotY = lerp(rotY, targetRotY, 0.06);
+  autoRotY += 0.003;
+
+  /* ── explode state machine ── */
+  let explosionVal = 0;
+  if (explodePhase === 'none') {
+    explosionVal = 0;
+    explodeT = 0;
+  } else if (explodePhase === 'charging') {
+    explosionVal = 0;
+    explodeT = 0;
+  } else if (explodePhase === 'exploding') {
+    explodeT = Math.min(explodeT + 0.018, 1.0);
+    explosionVal = explodeT;
+    if (explodeT >= 1.0) { explodePhase = 'reforming'; explodeT = 1.0; }
+    // store exploded positions
+    for (let i=0;i<N*3;i++) explodedPos[i] = basePositions[i];
+  } else if (explodePhase === 'reforming') {
+    explodeT = Math.max(explodeT - 0.012, 0.0);
+    explosionVal = explodeT;
+    if (explodeT <= 0.0) { explodePhase = 'none'; }
+  }
+
+  /* ── build MVP ── */
+  const aspect = canvas.width / canvas.height;
+  const proj  = mat4Perspective(Math.PI / 3.5, aspect, 0.1, 100.0);
+  const trans = mat4Trans(sphereX, sphereY, -4.5);
+  const rY    = mat4RotY(rotY + autoRotY);
+  const rX    = mat4RotX(rotX);
+  const mv    = mat4Multiply(trans, mat4Multiply(rY, rX));
+  const mvp   = mat4Multiply(proj, mv);
+
+  /* ── draw ── */
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+  gl.enable(gl.DEPTH_TEST);
+  gl.depthMask(false);
+
+  uploadPositions(basePositions);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, phaseBuf);
+  gl.enableVertexAttribArray(aPhase);
+  gl.vertexAttribPointer(aPhase, 1, gl.FLOAT, false, 0, 0);
+
+  gl.uniformMatrix4fv(uMVP, false, mvp);
+  gl.uniform3fv(uColor, currentColor);
+  gl.uniform1f(uExplode, explosionVal);
+  gl.uniform1f(uTime, t);
+
+  gl.drawArrays(gl.POINTS, 0, N);
+
+  /* ── charge ring ── */
+  if (explodePhase === 'charging' && pinchActive) {
+    updateRing(chargeAmount, pinchX, pinchY);
+  } else {
+    updateRing(0, 0, 0);
+  }
+}
+
+requestAnimationFrame(frame);
+
+/* ── boot mediapipe ── */
+if (typeof Hands !== 'undefined' && typeof Camera !== 'undefined') {
+  initMediaPipe();
+} else {
+  sHand.textContent = 'hand — mediapipe loading...';
+  window.addEventListener('load', () => {
+    setTimeout(initMediaPipe, 800);
+  });
+}
+
+})();
+</script>
+</body>
+</html>
