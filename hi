@@ -10,7 +10,7 @@
 
   #webcam-bg {
     position: fixed; inset: 
-    width: 100%; height: 100%;
+    width: 100%; height: 10
     object-fit: cover;
     opacity: 0;
     transform: scaleX(-1);
